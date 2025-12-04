@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Property Extractor</title>
+
+<style>
+    /* DARK & GOLD THEME */
+    body {
+        font-family: Arial, sans-serif;
+        padding: 20px;
+        background: #121212;
+        color: #d4af37;
+        margin: 0;
+    }
+
+    h2, h3 { margin-top: 25px; color: #f5c518; }
+
+    input, select {
+        padding: 8px;
+        width: 250px;
+        border: 1.5px solid #d4af37;
+        border-radius: 4px;
+        background: #222;
+        color: #d4af37;
+        font-weight: 600;
+        font-size: 14px;
+        margin-bottom: 10px;
+    }
+
+    button {
+        padding: 10px 18px;
+        border: none;
+        color: #121212;
+        font-weight: bold;
+        cursor: pointer;
+        border-radius: 6px;
+        margin: 5px;
+        font-size: 15px;
+        background: linear-gradient(90deg, #d4af37, #f5c518);
+        box-shadow: 0 0 8px #f5c518aa;
+        transition: background 0.3s ease;
+    }
+    button:hover:not(:disabled) { background: linear-gradient(90deg, #f5c518, #d4af37); }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+    #progressContainer {
+        width: 100%;
+        background: #333;
+        height: 22px;
+        border-radius: 5px;
+        margin: 10px 0;
+        box-shadow: inset 0 0 10px #f5c518aa;
+    }
+    #progressBar {
+        width: 0%;
+        height: 100%;
+        background: linear-gradient(90deg, #d4af37, #f5c518);
+        border-radius: 5px;
+        transition: 0.2s;
+    }
+
+    table {
+        border-collapse: collapse;
+        width: 100%;
+        background: #222;
+        color: #d4af37;
+        box-shadow: 0 0 15px #f5c518aa;
+        margin-bottom: 20px;
+        font-size: 14px;
+    }
+    th, td { padding: 8px; border: 1px solid #d4af37; text-align: left; }
+    th { background: #333; }
+    tbody tr:nth-child(even) { background: #1a1a1a; }
+
+    #logs {
+        height: 150px;
+        overflow-y: auto;
+        border: 1px solid #d4af37;
+        padding: 8px;
+        background: #222;
+        color: #f5c518;
+        font-family: monospace;
+        font-size: 13px;
+        box-shadow: inset 0 0 10px #f5c518aa;
+    }
+</style>
+</head>
+
+<body>
+
+<h2>Property Data Extractor</h2>
+
+<label>Select City:</label><br>
+<select id="citySelect">
+    <option value="vijayawada">Vijayawada - 1073</option>
+    <option value="visakhapatnam">Visakhapatnam - 1086</option>
+</select><br>
+
+<label>Assessment Number Start:</label><br>
+<input type="text" id="startNumber"><br>
+
+<label>Assessment Number End:</label><br>
+<input type="text" id="endNumber"><br>
+
+<label>Minimum Balance Filter:</label><br>
+<input type="text" id="minBalance"><br>
+
+<button id="startSearch">Search</button>
+<button id="pauseResume" style="display:none;">Pause</button>
+<button id="downloadExcel" style="display:none;">Download Excel</button>
+<button id="toggleDark">Dark Mode</button>
+
+<hr>
+
+<div id="progressContainer" style="display:none;">
+    <div id="progressBar"></div>
+</div>
+
+<div id="statusText"></div>
+
+<h3>Logs</h3>
+<div id="logs"></div>
+
+<h3>Results</h3>
+<table id="resultsTable">
+    <thead>
+        <tr>
+            <th>S.No</th>
+            <th>Assessment Number</th>
+            <th>Owner Name</th>
+            <th>Mobile</th>
+            <th>Property Address</th>
+            <th>Total Balance</th>
+            <th>Extracted At</th>
+        </tr>
+    </thead>
+    <tbody></tbody>
+</table>
+
+<h3>Errors</h3>
+<table id="errorTable">
+    <thead>
+        <tr><th>ID</th><th>Error</th></tr>
+    </thead>
+    <tbody></tbody>
+</table>
+
+<script>
+// DARK MODE toggle
+document.getElementById("toggleDark").onclick = () => {
+    document.body.classList.toggle("dark-mode");
+};
+
+// BASE URLS
+const cityUrls = {
+    vijayawada: "https://vijayawada.emunicipal.ap.gov.in/ptis/view",
+    visakhapatnam: "https://visakhapatnam.emunicipal.ap.gov.in/ptis/view"
+};
+
+// EXTRACTION CLASS
+class WorkingUltraFastExtractor {
+    constructor(start,end,minBalance,city){
+        this.results=[];
+        this.errors=[];
+        this.minBalance=minBalance;
+        this.concurrentLimit=30;
+        this.isPaused=false;
+        this.city=city;
+        this.baseUrl = cityUrls[city];
+        this.assessmentNumbers=[];
+        for(let i=start;i<=end;i++) this.assessmentNumbers.push(i.toString());
+    }
+
+    log(msg){
+        const logs=document.getElementById("logs");
+        logs.innerHTML+=msg+"<br>";
+        logs.scrollTop=logs.scrollHeight;
+    }
+
+    updateProgress(done,total){
+        const percent=(done/total)*100;
+        document.getElementById("progressBar").style.width=percent+"%";
+        document.getElementById("statusText").innerText=`Progress: ${done}/${total}`;
+    }
+
+    async start(){
+        document.getElementById("progressContainer").style.display="block";
+        document.getElementById("pauseResume").style.display="inline-block";
+        this.log("▶ Extraction Started...");
+        await this.extractAllProperties();
+        this.enableDownload();
+        this.log("✔ Completed");
+    }
+
+    pause(){ this.isPaused=true; this.log("⏸ Paused"); }
+    resume(){ this.isPaused=false; this.log("▶ Resumed"); this.start(); }
+
+    async extractAllProperties(){
+        let processed=0;
+        const total=this.assessmentNumbers.length;
+
+        for(let i=0;i<total;i+=this.concurrentLimit){
+            while(this.isPaused) await new Promise(r=>setTimeout(r,300));
+            const batch=this.assessmentNumbers.slice(i,i+this.concurrentLimit);
+            const results=await Promise.all(batch.map(id=>this.extractProperty(id)));
+
+            for(const res of results){
+                processed++;
+                this.updateProgress(processed,total);
+
+                if(res.success && res.passedFilter){
+                    this.results.push(res.data);
+                    this.addToTable(res.data, this.results.length); // send S.No
+                }
+                if(!res.success){
+                    this.errors.push({id:res.id,error:res.error});
+                    this.addError(res.id,res.error);
+                }
+            }
+        }
+    }
+
+    async extractProperty(id){
+        try{
+            this.log("Fetching : "+id);
+            const dcb=await this.fetchWithRetry(`${this.baseUrl}/viewDCBProperty-displayPropInfo.action?isCitizen=true&propertyId=${id}`,2);
+            if(this.isNotFound(dcb)) return {success:false,id,error:"Not found"};
+
+            const {ownerName,propertyAddress,totalBalance}=this.parseDCB(dcb);
+            const balNum=parseFloat(totalBalance.replace(/,/g,''))||0;
+            const passed=balNum>=this.minBalance;
+
+            let mobile="Not found";
+            if(passed){
+                try{
+                    const html=await this.fetchWithRetry(`${this.baseUrl}/viewProperty-viewForm.action?isCitizen=true&propertyId=${id}`,1);
+                    mobile=this.extractMobile(html);
+                }catch{}
+            }
+
+            return {
+                success:true,
+                passedFilter:passed,
+                data:{
+                    assessmentNumber:id,
+                    ownerName,
+                    unmaskedMobile:mobile,
+                    propertyAddress,
+                    totalBalance,
+                    extractedAt:new Date().toLocaleString()
+                }
+            };
+        }catch(e){
+            return {success:false,id,error:e.message};
+        }
+    }
+
+    isNotFound(html){
+        return html.includes("does not exist") || html.includes("not found") || html.includes("Enter a Valid");
+    }
+
+    parseDCB(html){
+        const doc=new DOMParser().parseFromString(html,"text/html");
+        const txt=doc.body.textContent;
+
+        const owner=txt.match(/Owner\s*Name[:\s]*([A-Za-z0-9., -]+)/i);
+        const addr=txt.match(/Property\s*Address[:\s]*([\s\S]+?)Category/i);
+        const bal=txt.match(/Total\s*Balance[:\s]*([\d,]+)/i);
+
+        return {
+            ownerName:owner?owner[1].trim():"Not found",
+            propertyAddress:addr?addr[1].replace(/\s+/g,' ').trim():"Not found",
+            totalBalance:bal?bal[1].trim():"0"
+        };
+    }
+
+    extractMobile(html){
+        const m=html.match(/([6-9]\d{9})/);
+        return m?m[1]:"Not found";
+    }
+
+    async fetchWithRetry(url,retries){
+        for(let i=0;i<=retries;i++){
+            try{
+                const res=await fetch(url);
+                if(!res.ok) throw new Error("HTTP "+res.status);
+                return await res.text();
+            }
+            catch(e){
+                if(i===retries) throw e;
+                await new Promise(r=>setTimeout(r,300));
+            }
+        }
+    }
+
+    addToTable(d,sno){
+        document.querySelector("#resultsTable tbody").innerHTML+=`
+        <tr>
+            <td>${sno}</td>
+            <td>${d.assessmentNumber}</td>
+            <td>${d.ownerName}</td>
+            <td>${d.unmaskedMobile}</td>
+            <td>${d.propertyAddress}</td>
+            <td>${d.totalBalance}</td>
+            <td>${d.extractedAt}</td>
+        </tr>`;
+    }
+
+    addError(id,err){
+        document.querySelector("#errorTable tbody").innerHTML+=
+        `<tr><td>${id}</td><td>${err}</td></tr>`;
+    }
+
+    enableDownload(){
+        const dlBtn=document.getElementById("downloadExcel");
+        dlBtn.style.display="inline-block";
+        dlBtn.onclick=()=>this.generateExcel();
+    }
+
+    generateExcel(){
+        let csv="S.No,Assessment Number,Owner Name,Mobile,Property Address,Total Balance,Extracted At\n";
+        this.results.forEach((r,i) => {
+            let addr = r.propertyAddress.replace(/\s+/g," ").trim();
+            const esc = v => `"${String(v).replace(/"/g,'""')}"`;
+            csv+=[i+1,esc(r.assessmentNumber),esc(r.ownerName),esc(r.unmaskedMobile),esc(addr),esc(r.totalBalance),esc(r.extractedAt)].join(",")+"\n";
+        });
+        const blob=new Blob([csv],{type:"text/csv"});
+        const url=URL.createObjectURL(blob);
+        const a=document.createElement("a");
+        a.href=url;
+        a.download="properties_fixed.csv";
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+}
+
+// INIT
+let extractor=null;
+
+document.getElementById("startSearch").onclick = () => {
+    const s=+startNumber.value, e=+endNumber.value, m=+minBalance.value;
+    const city=document.getElementById("citySelect").value;
+    if(isNaN(s)||isNaN(e)||isNaN(m)){ alert("Enter valid numbers"); return; }
+
+    document.querySelector("#resultsTable tbody").innerHTML="";
+    document.querySelector("#errorTable tbody").innerHTML="";
+    document.getElementById("logs").innerHTML="";
+
+    extractor=new WorkingUltraFastExtractor(s,e,m,city);
+    extractor.start();
+};
+
+document.getElementById("pauseResume").onclick = () => {
+    if(!extractor) return;
+    if(!extractor.isPaused){
+        extractor.pause();
+        pauseResume.innerText="Resume";
+    }else{
+        extractor.resume();
+        pauseResume.innerText="Pause";
+    }
+};
+</script>
+
+</body>
+</html>
